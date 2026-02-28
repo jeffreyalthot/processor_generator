@@ -36,9 +36,14 @@ class AIDashboard(tk.Tk):
 
         self.script_var = tk.StringVar(value="cpu_circuit_builder.py")
         self.out_dir_var = tk.StringVar(value="out_design")
+        self.budget_var = tk.StringVar(value="300")
+        self.eval_cycles_var = tk.StringVar(value="1000")
         self.status_var = tk.StringVar(value="Prêt")
         self.best_var = tk.StringVar(value="Best score: N/A")
         self.last_refresh_var = tk.StringVar(value="Dernière lecture: jamais")
+        self.floorplan_var = tk.StringVar(value="Floorplan: en attente")
+        self.floorplan_image: tk.PhotoImage | None = None
+        self.floorplan_mtime: float | None = None
 
         self._build_ui()
         self.after(250, self._flush_log_queue)
@@ -56,8 +61,13 @@ class AIDashboard(tk.Tk):
         ttk.Entry(top, textvariable=self.out_dir_var, width=60).grid(row=1, column=1, sticky="ew", padx=4)
         ttk.Button(top, text="Parcourir", command=self._pick_output_dir).grid(row=1, column=2, padx=2)
 
-        ttk.Button(top, text="Lancer", command=self.start_training).grid(row=0, column=3, rowspan=2, padx=6)
-        ttk.Button(top, text="Stop", command=self.stop_training).grid(row=0, column=4, rowspan=2)
+        ttk.Label(top, text="Budget (s):").grid(row=2, column=0, sticky="w")
+        ttk.Entry(top, textvariable=self.budget_var, width=12).grid(row=2, column=1, sticky="w", padx=4)
+        ttk.Label(top, text="Eval cycles:").grid(row=2, column=1, sticky="e", padx=(0, 100))
+        ttk.Entry(top, textvariable=self.eval_cycles_var, width=12).grid(row=2, column=2, sticky="w", padx=4)
+
+        ttk.Button(top, text="Lancer", command=self.start_training).grid(row=0, column=3, rowspan=3, padx=6)
+        ttk.Button(top, text="Stop", command=self.stop_training).grid(row=0, column=4, rowspan=3)
 
         top.grid_columnconfigure(1, weight=1)
 
@@ -97,11 +107,17 @@ class AIDashboard(tk.Tk):
         self.tree.pack(side="left", fill="both", expand=True)
         yscroll.pack(side="right", fill="y")
 
+        preview_frame = ttk.Labelframe(split, text="Floorplan best (live)")
+        ttk.Label(preview_frame, textvariable=self.floorplan_var).pack(anchor="w", padx=6, pady=(6, 2))
+        self.floorplan_label = ttk.Label(preview_frame)
+        self.floorplan_label.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+
         log_frame = ttk.Labelframe(split, text="Logs live")
         self.log_text = ScrolledText(log_frame, wrap="word", font=("Consolas", 10))
         self.log_text.pack(fill="both", expand=True)
 
         split.add(table_frame, weight=2)
+        split.add(preview_frame, weight=2)
         split.add(log_frame, weight=3)
 
     def _pick_script(self) -> None:
@@ -125,7 +141,24 @@ class AIDashboard(tk.Tk):
             return
 
         self.stop_event.clear()
-        cmd = ["python", str(script)]
+        try:
+            budget = int(self.budget_var.get())
+            eval_cycles = int(self.eval_cycles_var.get())
+        except ValueError:
+            messagebox.showerror("Paramètres invalides", "Budget et eval cycles doivent être des entiers.")
+            return
+
+        cmd = [
+            "python",
+            "-u",
+            str(script),
+            "--out-dir",
+            str(Path(self.out_dir_var.get()).expanduser()),
+            "--design-budget-sec",
+            str(budget),
+            "--eval-cycles",
+            str(eval_cycles),
+        ]
         self.status_var.set(f"Exécution: {' '.join(cmd)}")
         self.log_text.insert("end", f"\n=== START {time.strftime('%H:%M:%S')} ===\n")
         self.log_text.see("end")
@@ -136,6 +169,7 @@ class AIDashboard(tk.Tk):
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            cwd=str(script.parent),
         )
         threading.Thread(target=self._read_process_output, daemon=True).start()
 
@@ -182,6 +216,8 @@ class AIDashboard(tk.Tk):
         if log_path.exists():
             self.status_var.set(f"Monitoring: {log_path}")
 
+        self._refresh_floorplan_preview(out_dir)
+
         self.last_refresh_var.set(f"Dernière lecture: {time.strftime('%H:%M:%S')}")
         self.after(1000, self._refresh_from_outputs)
 
@@ -208,6 +244,23 @@ class AIDashboard(tk.Tk):
         except OSError:
             return []
         return rows[-limit:]
+
+    def _refresh_floorplan_preview(self, out_dir: Path) -> None:
+        png_path = out_dir / "floorplan_best.png"
+        if not png_path.exists():
+            self.floorplan_var.set("Floorplan: aucun PNG détecté (matplotlib optionnel)")
+            return
+
+        try:
+            mtime = png_path.stat().st_mtime
+            if self.floorplan_mtime == mtime:
+                return
+            self.floorplan_mtime = mtime
+            self.floorplan_image = tk.PhotoImage(file=str(png_path))
+            self.floorplan_label.configure(image=self.floorplan_image)
+            self.floorplan_var.set(f"Floorplan: {png_path.name} @ {time.strftime('%H:%M:%S')}")
+        except tk.TclError as exc:
+            self.floorplan_var.set(f"Floorplan: erreur de lecture PNG ({exc})")
 
     def _refresh_tree(self, rows: list[IterRow]) -> None:
         self.tree.delete(*self.tree.get_children())
