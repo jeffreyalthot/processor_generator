@@ -4,6 +4,7 @@ from __future__ import annotations
 import csv
 import queue
 import subprocess
+import sys
 import threading
 import time
 import tkinter as tk
@@ -33,6 +34,7 @@ class AIDashboard(tk.Tk):
         self.process: subprocess.Popen[str] | None = None
         self.log_queue: queue.Queue[str] = queue.Queue()
         self.stop_event = threading.Event()
+        self.process_exit_code: int | None = None
 
         self.script_var = tk.StringVar(value="cpu_circuit_builder.py")
         self.out_dir_var = tk.StringVar(value="out_design")
@@ -149,7 +151,7 @@ class AIDashboard(tk.Tk):
             return
 
         cmd = [
-            "python",
+            sys.executable,
             "-u",
             str(script),
             "--out-dir",
@@ -177,6 +179,12 @@ class AIDashboard(tk.Tk):
         self.stop_event.set()
         if self.process and self.process.poll() is None:
             self.process.terminate()
+            try:
+                self.process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait(timeout=2)
+                self.log_queue.put("[UI] Le process ne répondait pas, arrêt forcé (kill).\n")
             self.status_var.set("Process arrêté")
             self.log_queue.put("\n[UI] Process terminé par l'utilisateur.\n")
 
@@ -187,9 +195,9 @@ class AIDashboard(tk.Tk):
                 break
             self.log_queue.put(line)
 
-        rc = self.process.poll()
+        rc = self.process.wait()
         self.log_queue.put(f"\n[UI] Process terminé (code={rc}).\n")
-        self.status_var.set(f"Terminé (code={rc})")
+        self.process_exit_code = rc
 
     def _flush_log_queue(self) -> None:
         try:
@@ -199,6 +207,11 @@ class AIDashboard(tk.Tk):
                 self.log_text.see("end")
         except queue.Empty:
             pass
+
+        if self.process_exit_code is not None:
+            self.status_var.set(f"Terminé (code={self.process_exit_code})")
+            self.process_exit_code = None
+
         self.after(250, self._flush_log_queue)
 
     def _refresh_from_outputs(self) -> None:
